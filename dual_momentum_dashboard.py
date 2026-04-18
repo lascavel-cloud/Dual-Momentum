@@ -15,7 +15,15 @@ blended_weights = {'2m': 0.25, '3m': 0.50, '4m': 0.25}
 target_daily_vol = 0.010
 days = {'2m': 42, '3m': 63, '4m': 84}
 
-# ========================== DATA FETCH (Robust) ==========================
+# ========================== PORTFOLIO SIZE INPUT ==========================
+st.sidebar.header("💰 Portfolio Settings")
+total_portfolio = st.sidebar.number_input("Total Portfolio Value ($)", 
+                                        min_value=1000.0, 
+                                        value=30000.0, 
+                                        step=1000.0,
+                                        format="%.0f")
+
+# ========================== DATA FETCH ==========================
 @st.cache_data(ttl=300)
 def fetch_data():
     data = {}
@@ -26,26 +34,25 @@ def fetch_data():
         try:
             df = yf.download(t, start=start, end=end, progress=False, auto_adjust=True)
             
-            # Handle different column formats from yfinance
             if isinstance(df.columns, pd.MultiIndex):
                 df = df['Close']
             elif 'Close' in df.columns:
                 df = df['Close']
             else:
-                df = df.iloc[:, 0]  # fallback to first column
+                df = df.iloc[:, 0]
             
             df = df.reset_index()
             df.columns = ['date', 'close']
             df['date'] = pd.to_datetime(df['date']).dt.date
             data[t] = df
-        except Exception as e:
-            continue  # skip if one ticker fails
+        except:
+            continue
     return data
 
 data_dict = fetch_data()
 
 if len(data_dict) == 0:
-    st.error("Could not fetch market data. Please refresh again.")
+    st.error("Could not fetch market data. Please try refreshing.")
     st.stop()
 
 # ========================== SIGNAL CALCULATION ==========================
@@ -63,7 +70,6 @@ def calculate_signals(df):
     if all(x is not None for x in [roc2, roc3, roc4]):
         blended = blended_weights['2m']*roc2 + blended_weights['3m']*roc3 + blended_weights['4m']*roc4
     
-    # 20-day volatility
     vol = None
     if len(df) >= 21:
         returns = df['close'].iloc[-21:].pct_change().dropna()
@@ -111,7 +117,19 @@ def generate_allocation(signals):
 
 allocation = generate_allocation(signals)
 
-# ========================== UI ==========================
+# ========================== TRANCHE LOGIC ==========================
+today = datetime.now()
+week_of_month = ((today.day - 1) // 7) + 1
+due_tranche = week_of_month
+
+tranche_size = total_portfolio / 3
+due_allocation = allocation['alloc'] / 100
+due_cash = allocation['cash'] / 100
+
+due_vbk_amount = tranche_size * due_allocation if allocation['winner'] == 'VBK' else 0
+due_shv_amount = tranche_size * due_cash if allocation['winner'] != 'SHV' else tranche_size
+
+# ========================== MAIN UI ==========================
 st.subheader("🎯 Live Recommendation")
 col1, col2, col3 = st.columns([2, 2, 1])
 
@@ -125,19 +143,39 @@ with col2:
         st.info(f"**SHV (Cash)**: {allocation['cash']}%")
 
 with col3:
-    week = ((datetime.now().day - 1) // 7) + 1
-    st.write(f"**Today is Week {week}**")
-    for i in range(1,4):
-        st.write(f"Tranche {i}: {'🟢 REBALANCE TODAY' if i == week else '⏳ pending'}")
+    st.write(f"**Today is Week {week_of_month}**")
+    for i in range(1, 4):
+        if i == due_tranche:
+            st.success(f"**Tranche {i}**: 🟢 REBALANCE TODAY")
+        else:
+            st.write(f"Tranche {i}: ⏳ pending")
 
-# Ranking Table
+# ========================== WHAT TO DO TODAY ==========================
+st.subheader("✅ What You Should Do Today")
+
+if due_tranche == week_of_month:
+    st.success(f"**Rebalance Tranche {due_tranche} (~${tranche_size:,.0f}) today**")
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("Buy VBK", f"${due_vbk_amount:,.0f}", 
+                 f"{allocation['alloc']}% of tranche")
+    with col_b:
+        st.metric("Move to SHV", f"${due_shv_amount:,.0f}", 
+                 f"{allocation['cash']}% of tranche")
+    
+    st.info("**Action**: Sell whatever is currently in Tranche 3 and buy the amounts above at market close or end of day.")
+else:
+    st.info("No rebalancing needed today. Wait for your tranche's week.")
+
+# ========================== MOMENTUM RANKING ==========================
 st.subheader("📊 Momentum Ranking")
 df_rank = pd.DataFrame.from_dict(signals, orient='index')[['price', 'roc3', 'blended', 'vol20d']]
 df_rank.columns = ['Price', '3m ROC (%)', 'Blended ROC (%)', '20d Vol (%)']
 df_rank = df_rank.sort_values('Blended ROC (%)', ascending=False)
 st.dataframe(df_rank.style.format("{:.2f}"), use_container_width=True)
 
-# Chart
+# ========================== CHART ==========================
 st.subheader("📈 Price History (Last 6 Months)")
 fig = go.Figure()
 for t in ['VUG', 'VBK', 'GLD']:
@@ -149,9 +187,11 @@ st.plotly_chart(fig, use_container_width=True)
 
 # Sidebar
 with st.sidebar:
-    st.header("Settings")
-    if st.button("🔄 Refresh Data"):
+    st.header("⚙️ Settings")
+    if st.button("🔄 Refresh All Data"):
         st.cache_data.clear()
         st.rerun()
+    
+    st.caption("Tip: Only rebalance the tranche marked 'REBALANCE TODAY'")
 
-st.success("✅ Dashboard is now running!")
+st.success("✅ Dashboard updated with clear action instructions!")
